@@ -53,30 +53,34 @@ jobs:
         # [source: 18] - Lưu ý: Nên cân nhắc sử dụng tag theo commit hash hoặc version thay vì chỉ 'latest' cho production
 
       # Bước 6: Deploy lên DigitalOcean Droplet qua SSH (Chỉ thực hiện khi push vào nhánh main)
-      - name: Deploy to Production Server
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Chỉ chạy khi push vào main
-        uses: appleboy/ssh-action@master # Action để thực thi lệnh SSH
+      - name: Triển khai lên DigitalOcean Droplet
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: appleboy/ssh-action@v1.2.2
         with:
-          host: ${{ secrets.SSH_HOST }}             # IP hoặc hostname của Droplet (từ GitHub Secrets)
-          username: ${{ secrets.SSH_USERNAME }}     # Username đăng nhập SSH (từ GitHub Secrets)
-          key: ${{ secrets.SSH_PRIVATE_KEY }}       # Private key SSH (từ GitHub Secrets)
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
           script: |
-            IMAGE_NAME="dongmt2/my-web-app:latest" # Thay username/tên_image của bạn
-            CONTAINER_NAME="my-running-app" # Tên bạn muốn đặt cho container đang chạy
+            # Đăng nhập vào Docker Hub trên server nếu cần (cho image private)
+            # echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-            echo "Pulling latest image: $IMAGE_NAME"
+            IMAGE_NAME="dongmt2/my-web-app:latest" # Thay bằng tên image của bạn
+            CONTAINER_NAME="my-running-app" # Tên container bạn muốn chạy
+
+            echo "Kéo image mới nhất: $IMAGE_NAME"
             docker pull $IMAGE_NAME
 
-            echo "Stopping existing container: $CONTAINER_NAME"
-            docker stop $CONTAINER_NAME || true # Dừng container cũ (|| true để không báo lỗi nếu chưa có)
+            echo "Dừng container hiện tại: $CONTAINER_NAME"
+            docker stop $CONTAINER_NAME || true # Dừng container cũ (nếu có)
 
-            echo "Removing existing container: $CONTAINER_NAME"
-            docker rm $CONTAINER_NAME || true # Xóa container cũ (|| true để không báo lỗi nếu chưa có)
+            echo "Xóa container hiện tại: $CONTAINER_NAME"
+            docker rm $CONTAINER_NAME || true # Xóa container cũ (nếu có)
 
-            echo "Starting new container: $CONTAINER_NAME from $IMAGE_NAME"
+            echo "Khởi động container mới: $CONTAINER_NAME từ $IMAGE_NAME"
             docker run -d -p 80:80 --name $CONTAINER_NAME --restart=always $IMAGE_NAME
 
-            echo "Deployment successful!"
+            echo "Triển khai thành công!"
 
-            # (Tùy chọn) Xóa image cũ không dùng đến
+            # (Tùy chọn) Xóa các image không sử dụng để giải phóng dung lượng
             docker image prune -af
