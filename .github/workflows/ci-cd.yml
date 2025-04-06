@@ -55,7 +55,7 @@ jobs:
       # Bước 6: Deploy lên DigitalOcean Droplet qua SSH (Chỉ thực hiện khi push vào nhánh main)
       - name: Triển khai lên DigitalOcean Droplet
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: appleboy/ssh-action@v1.2.2
+        uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
