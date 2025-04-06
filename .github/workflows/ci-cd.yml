@@ -58,12 +58,9 @@ jobs:
         uses: appleboy/ssh-action@master # Action để thực thi lệnh SSH
         with:
           host: ${{ secrets.SSH_HOST }}             # IP hoặc hostname của Droplet (từ GitHub Secrets)
-          username: ${{ secrets.SSH_USERNAME }}       # Username đăng nhập SSH (từ GitHub Secrets)
+          username: ${{ secrets.SSH_USERNAME }}     # Username đăng nhập SSH (từ GitHub Secrets)
           key: ${{ secrets.SSH_PRIVATE_KEY }}       # Private key SSH (từ GitHub Secrets)
           script: |
-            # Login vào Docker Hub trên server nếu cần (cho image private)
-            # echo ${{ secrets.DOCKER_PASSWORD }} | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
-
             IMAGE_NAME="dongmt2/my-web-app:latest" # Thay username/tên_image của bạn
             CONTAINER_NAME="my-running-app" # Tên bạn muốn đặt cho container đang chạy
 
@@ -77,11 +74,6 @@ jobs:
             docker rm $CONTAINER_NAME || true # Xóa container cũ (|| true để không báo lỗi nếu chưa có)
 
             echo "Starting new container: $CONTAINER_NAME from $IMAGE_NAME"
-            # Chạy container mới
-            # -d: chạy nền
-            # -p 80:80: map cổng 80 của Droplet vào cổng 80 của container (Nginx)
-            # --name: đặt tên cho container
-            # --restart=always: Tự động khởi động lại container nếu nó bị dừng hoặc server reboot
             docker run -d -p 80:80 --name $CONTAINER_NAME --restart=always $IMAGE_NAME
 
             echo "Deployment successful!"
