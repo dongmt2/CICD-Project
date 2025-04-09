@@ -1,4 +1,4 @@
-name: Enhanced CI/CD Pipeline
+name: Enhanced CI/CD Pipeline with Detailed Notifications
 
 on:
   push:
@@ -9,9 +9,9 @@ on:
       - main
 
 env:
-  # Đặt tên image và container làm biến môi trường để dễ quản lý
   DOCKER_IMAGE_NAME: dongmt2/my-web-app # Thay bằng username/tên_image của bạn
   CONTAINER_NAME: my-running-app
+  TRIVY_REPORT_FILE: trivy_report.txt
 
 jobs:
   build-scan-push-deploy:
@@ -20,45 +20,41 @@ jobs:
     steps:
       # === CI Steps ===
 
-      # Bước 1: Checkout mã nguồn
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Bước 2: Lấy tag Git (commit SHA ngắn) để đặt tên version cho image
-      # Điều này quan trọng cho việc quản lý phiên bản và rollback (Bước 9 - Phục hồi)
       - name: Get Git commit short SHA
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      # Bước 3: Build Docker image với tag là commit SHA
       - name: Build Docker image
         run: |
           docker build -t ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} -t ${{ env.DOCKER_IMAGE_NAME }}:latest .
-          echo "Image Tag: ${{ steps.vars.outputs.sha_short }}"
-          
-      # Bước 4: Kiểm tra bảo mật Docker image với Trivy
-      # (Hoàn thiện Bước 9 - Ngừng pipeline nếu có lỗi bảo mật nghiêm trọng)
-      - name: Scan image with Trivy for High/Critical vulnerabilities
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: '${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}'
-          format: 'table'
-          # exit-code: '1' -> Sẽ dừng pipeline (báo lỗi) nếu tìm thấy lỗ hổng theo mức độ chỉ định bên dưới
-          exit-code: '1' 
-          ignore-unfixed: true # Bỏ qua lỗi chưa có bản vá
-          vuln-type: 'os,library'
-          # severity: Chỉ dừng pipeline nếu có lỗi CRITICAL hoặc HIGH
-          severity: 'CRITICAL,HIGH' 
+          echo "Image Built: ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} and :latest"
 
-      # Bước 5: Đăng nhập vào Docker Hub
+      # Chạy Trivy để tạo file báo cáo chi tiết (luôn thành công bước này để có báo cáo)
+      - name: Generate Trivy Scan Report
+        run: |
+          docker run --rm \
+            aquasec/trivy image --format table --output ${{ env.TRIVY_REPORT_FILE }} --ignore-unfixed \
+            --vuln-type os,library --severity CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN \
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} || echo "Trivy scan completed (report generated at ${{ env.TRIVY_REPORT_FILE }})"
+
+      # Chạy Trivy lần nữa để kiểm tra và dừng pipeline nếu có lỗi nghiêm trọng
+      - name: Check for High/Critical Vulnerabilities
+        run: |
+          docker run --rm \
+            aquasec/trivy image --exit-code 1 --ignore-unfixed \
+            --vuln-type os,library --severity CRITICAL,HIGH \
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          echo "Trivy security check passed (No High/Critical vulnerabilities found)."
+
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Bước 6: Push image lên Docker Hub (cả tag commit SHA và latest)
-      # (Chỉ chạy khi push vào main và scan Trivy thành công)
       - name: Push image to Docker Hub
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
@@ -67,32 +63,22 @@ jobs:
           echo "Image pushed: ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} and :latest"
 
       # === CD Steps ===
-
-      # Bước 7: Deploy lên DigitalOcean Droplet qua SSH
-      # (Hoàn thiện Bước 8 - Tích hợp cơ chế tự phục hồi bằng --restart=always)
-      # (Chỉ chạy khi push vào main và các bước trước thành công)
       - name: Deploy to Production Server
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: appleboy/ssh-action@master
+        id: deploy # Đặt ID cho bước này để lấy output nếu cần
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            IMAGE_TAG="${{ steps.vars.outputs.sha_short }}" # Sử dụng tag theo commit SHA
+            IMAGE_TAG="${{ steps.vars.outputs.sha_short }}"
             IMAGE_NAME_WITH_TAG="${{ env.DOCKER_IMAGE_NAME }}:$IMAGE_TAG"
             CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
 
             echo "--- Starting Deployment on Server ---"
-            # Login Docker Hub (nếu cần)
-            # echo ${{ secrets.DOCKER_PASSWORD }} | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
-
-            echo "Pulling image: $IMAGE_NAME_WITH_TAG"
             docker pull $IMAGE_NAME_WITH_TAG
-
-            # Lấy ID của container cũ (nếu đang chạy) để dùng cho rollback tạm thời nếu cần
             OLD_CONTAINER_ID=$(docker ps -q -f name=$CONTAINER_NAME)
-
             if [ ! -z "$OLD_CONTAINER_ID" ]; then
               echo "Stopping existing container: $CONTAINER_NAME ($OLD_CONTAINER_ID)"
               docker stop $OLD_CONTAINER_ID
@@ -101,43 +87,113 @@ jobs:
             else
               echo "No existing container named $CONTAINER_NAME found."
             fi
-            
             echo "Starting new container: $CONTAINER_NAME from $IMAGE_NAME_WITH_TAG"
-            # Chạy container mới với --restart=always để tự phục hồi khi crash/reboot
-            # Và thêm healthcheck đơn giản (tùy chọn)
-            docker run -d \
-              -p 80:80 \
-              --name $CONTAINER_NAME \
-              --restart=always \
-              $IMAGE_NAME_WITH_TAG
-
-            # (Tùy chọn) Thêm một bước kiểm tra đơn giản xem web có chạy không sau khi deploy
+            docker run -d -p 80:80 --name $CONTAINER_NAME --restart=always $IMAGE_NAME_WITH_TAG
             echo "Performing simple health check..."
-            sleep 5 # Chờ container khởi động
-            # Kiểm tra xem có thể kết nối tới localhost:80 (bên trong server) không
+            sleep 5 
             if curl --fail --silent --max-time 5 http://localhost:80 > /dev/null; then
               echo "Health check PASSED. Deployment successful!"
-              # Xóa image cũ không dùng đến (trừ image đang chạy và latest)
               docker image prune -af --filter "label!=maintainer=me" 
             else
               echo "Health check FAILED! Deployment might have issues."
-              # Chỗ này có thể thêm logic rollback phức tạp hơn nếu muốn
-              # Ví dụ: docker start $OLD_CONTAINER_ID (nếu bạn giữ lại container cũ thay vì rm)
-              exit 1 # Báo lỗi để pipeline biết deploy thất bại
+              # Cân nhắc thêm lệnh để gửi tín hiệu lỗi cụ thể hơn nếu cần
+              exit 1 
             fi
             echo "--- Deployment Script Finished ---"
 
       # === Notification Step ===
 
-      # Bước 8: Gửi thông báo kết quả tới Slack
-      # (Hoàn thiện Bước 10 - Nhận thông báo)
-      # Luôn chạy bước này, bất kể các bước trước thành công hay thất bại (always())
-      - name: Send Slack Notification
-        if: always() # Luôn chạy, kể cả khi các bước trước thất bại
-        uses: rtCamp/action-slack-notify@v2 # Sử dụng action thông báo Slack
+      # Đọc một phần nội dung báo cáo Trivy để nhúng vào Slack
+      - name: Read Trivy Report Summary
+        id: trivy_report_summary
+        if: always() # Luôn chạy để lấy thông báo kể cả khi thất bại
+        run: |
+          if [[ -f "${{ env.TRIVY_REPORT_FILE }}" ]]; then
+            # Lấy khoảng 30 dòng đầu của báo cáo
+            report_content=$(head -n 30 "${{ env.TRIVY_REPORT_FILE }}")
+            # Escape ký tự đặc biệt cho JSON payload của Slack
+            report_content="${report_content//'%'/'%25'}"
+            report_content="${report_content//$'\n'/'%0A'}"
+            report_content="${report_content//$'\r'/'%0D'}"
+            echo "content<<EOF" >> $GITHUB_OUTPUT
+            echo "$report_content" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "file_exists=true" >> $GITHUB_OUTPUT
+            echo "status_text=Trivy report generated." >> $GITHUB_OUTPUT
+          else
+            echo "content=Trivy report file not found (${{ env.TRIVY_REPORT_FILE }})." >> $GITHUB_OUTPUT
+            echo "file_exists=false" >> $GITHUB_OUTPUT
+            echo "status_text=Trivy report not found." >> $GITHUB_OUTPUT
+          fi
+          
+      # Gửi thông báo chi tiết tới Slack
+      - name: Send Detailed Slack Notification
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          # ID của kênh Slack (Lấy từ URL của kênh trên trình duyệt: ví dụ C12345ABCDE)
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          # Sử dụng Slack Block Kit để định dạng tin nhắn đẹp hơn
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "CI/CD Pipeline Status: ${{ job.status }} :${{ job.status == 'success' && 'white_check_mark' || 'x' }}:",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {"type": "mrkdwn", "text": "*Repository:*\n<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>"},
+                    {"type": "mrkdwn", "text": "*Branch:*\n`${{ github.ref_name }}`"},
+                    {"type": "mrkdwn", "text": "*Commit:*\n<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|`${{ steps.vars.outputs.sha_short }}`>"},
+                    {"type": "mrkdwn", "text": "*Triggered by:*\n`${{ github.actor }}`"}
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Trivy Security Scan Summary:*\n${{ steps.trivy_report_summary.outputs.status_text }}"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "${{ steps.trivy_report_summary.outputs.file_exists == 'true' && format('```\n{0}\n```', steps.trivy_report_summary.outputs.content) || steps.trivy_report_summary.outputs.content }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                   "type": "section",
+                   "text": {
+                     "type": "mrkdwn",
+                     "text": "*Deployment Status:*\n`${{ steps.deploy.outcome || 'Skipped/Failed Before Deploy' }}`" 
+                   }
+                 },
+                {
+                  "type": "context",
+                  "elements": [
+                     {
+                      "type": "mrkdwn",
+                      "text": "*Action:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Full Workflow Run>"
+                    }
+                  ]
+                }
+              ]
+            }
         env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }} # Sử dụng Webhook URL thay vì Bot Token (đơn giản hơn)
-          SLACK_USERNAME: "GitHub Actions CI/CD"
-          SLACK_ICON_EMOJI: ":github:"
-          SLACK_COLOR: ${{ job.status }} # Màu thông báo theo trạng thái job (success=good, failure=danger)
-          SLACK_MESSAGE: "Build & Deploy Job *${{ job.status }}* for repository `${{ github.repository }}`.\nCommit: `${{ github.sha }}` by `${{ github.actor }}`.\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>"
+          # Token của Slack Bot (Bắt buộc cho action này)
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
