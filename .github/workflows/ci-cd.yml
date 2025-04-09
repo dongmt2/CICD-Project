@@ -1,6 +1,5 @@
-name: CI/CD Pipeline with Security Scan and Deploy
+name: Enhanced CI/CD Pipeline
 
-# Kích hoạt workflow khi có push hoặc pull request vào nhánh main
 on:
   push:
     branches:
@@ -9,78 +8,136 @@ on:
     branches:
       - main
 
+env:
+  # Đặt tên image và container làm biến môi trường để dễ quản lý
+  DOCKER_IMAGE_NAME: dongmt2/my-web-app # Thay bằng username/tên_image của bạn
+  CONTAINER_NAME: my-running-app
+
 jobs:
   build-scan-push-deploy:
-    runs-on: ubuntu-latest # Chạy job trên máy ảo Ubuntu mới nhất của GitHub
-
+    runs-on: ubuntu-latest
+    
     steps:
-      # Bước 1: Checkout mã nguồn từ repository
+      # === CI Steps ===
+
+      # Bước 1: Checkout mã nguồn
       - name: Checkout code
-        uses: actions/checkout@v4 # Sử dụng action chính thức để checkout code
+        uses: actions/checkout@v4
 
-      # Bước 2: Build Docker image
+      # Bước 2: Lấy tag Git (commit SHA ngắn) để đặt tên version cho image
+      # Điều này quan trọng cho việc quản lý phiên bản và rollback (Bước 9 - Phục hồi)
+      - name: Get Git commit short SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      # Bước 3: Build Docker image với tag là commit SHA
       - name: Build Docker image
-        run: docker build -t my-web-app . # Build image từ Dockerfile và đặt tên là my-web-app [source: 15]
-
-      # Bước 3: Kiểm tra bảo mật Docker image với Trivy
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@master # Sử dụng action chính thức của Trivy
+        run: |
+          docker build -t ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} -t ${{ env.DOCKER_IMAGE_NAME }}:latest .
+          echo "Image Tag: ${{ steps.vars.outputs.sha_short }}"
+          
+      # Bước 4: Kiểm tra bảo mật Docker image với Trivy
+      # (Hoàn thiện Bước 9 - Ngừng pipeline nếu có lỗi bảo mật nghiêm trọng)
+      - name: Scan image with Trivy for High/Critical vulnerabilities
+        uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'my-web-app' # Chỉ định image cần scan
-          format: 'table' # Định dạng output (có thể là 'json', 'sarif')
-          exit-code: '0' # Không fail pipeline nếu tìm thấy lỗ hổng (có thể đổi thành '1' để fail nếu có HIGH,CRITICAL)
-          ignore-unfixed: true # Bỏ qua các lỗ hổng chưa có bản vá
-          vuln-type: 'os,library' # Loại lỗ hổng cần scan
-          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN' # Mức độ nghiêm trọng cần báo cáo
+          image-ref: '${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}'
+          format: 'table'
+          # exit-code: '1' -> Sẽ dừng pipeline (báo lỗi) nếu tìm thấy lỗ hổng theo mức độ chỉ định bên dưới
+          exit-code: '1' 
+          ignore-unfixed: true # Bỏ qua lỗi chưa có bản vá
+          vuln-type: 'os,library'
+          # severity: Chỉ dừng pipeline nếu có lỗi CRITICAL hoặc HIGH
+          severity: 'CRITICAL,HIGH' 
 
-      # Bước 4: Đăng nhập vào Docker Hub
+      # Bước 5: Đăng nhập vào Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }} # Lấy username từ GitHub Secrets
-          password: ${{ secrets.DOCKER_PASSWORD }} # Lấy password từ GitHub Secrets [source: 17]
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Bước 5: Tag và Đẩy image lên Docker Hub (Chỉ thực hiện khi push vào nhánh main)
-      - name: Tag and Push image to Docker Hub
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Chỉ chạy khi push vào main
-        run: |
-          IMAGE_NAME="dongmt2/my-web-app" # Thay bằng username/tên_image của bạn trên Docker Hub
-          # Gắn tag cho image
-          docker tag my-web-app $IMAGE_NAME:latest
-          # Đẩy image lên Docker Hub
-          docker push $IMAGE_NAME:latest
-          echo "Image pushed to $IMAGE_NAME:latest"
-        # [source: 18] - Lưu ý: Nên cân nhắc sử dụng tag theo commit hash hoặc version thay vì chỉ 'latest' cho production
-
-      # Bước 6: Deploy lên DigitalOcean Droplet qua SSH (Chỉ thực hiện khi push vào nhánh main)
-      - name: Triển khai lên DigitalOcean Droplet
+      # Bước 6: Push image lên Docker Hub (cả tag commit SHA và latest)
+      # (Chỉ chạy khi push vào main và scan Trivy thành công)
+      - name: Push image to Docker Hub
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: appleboy/ssh-action@v1
+        run: |
+          docker push ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          docker push ${{ env.DOCKER_IMAGE_NAME }}:latest
+          echo "Image pushed: ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} and :latest"
+
+      # === CD Steps ===
+
+      # Bước 7: Deploy lên DigitalOcean Droplet qua SSH
+      # (Hoàn thiện Bước 8 - Tích hợp cơ chế tự phục hồi bằng --restart=always)
+      # (Chỉ chạy khi push vào main và các bước trước thành công)
+      - name: Deploy to Production Server
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}
           script: |
-            # Đăng nhập vào Docker Hub trên server nếu cần (cho image private)
-            # echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+            IMAGE_TAG="${{ steps.vars.outputs.sha_short }}" # Sử dụng tag theo commit SHA
+            IMAGE_NAME_WITH_TAG="${{ env.DOCKER_IMAGE_NAME }}:$IMAGE_TAG"
+            CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
 
-            IMAGE_NAME="dongmt2/my-web-app:latest" # Thay bằng tên image của bạn
-            CONTAINER_NAME="my-running-app" # Tên container bạn muốn chạy
+            echo "--- Starting Deployment on Server ---"
+            # Login Docker Hub (nếu cần)
+            # echo ${{ secrets.DOCKER_PASSWORD }} | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
 
-            echo "Kéo image mới nhất: $IMAGE_NAME"
-            docker pull $IMAGE_NAME
+            echo "Pulling image: $IMAGE_NAME_WITH_TAG"
+            docker pull $IMAGE_NAME_WITH_TAG
 
-            echo "Dừng container hiện tại: $CONTAINER_NAME"
-            docker stop $CONTAINER_NAME || true # Dừng container cũ (nếu có)
+            # Lấy ID của container cũ (nếu đang chạy) để dùng cho rollback tạm thời nếu cần
+            OLD_CONTAINER_ID=$(docker ps -q -f name=$CONTAINER_NAME)
 
-            echo "Xóa container hiện tại: $CONTAINER_NAME"
-            docker rm $CONTAINER_NAME || true # Xóa container cũ (nếu có)
+            if [ ! -z "$OLD_CONTAINER_ID" ]; then
+              echo "Stopping existing container: $CONTAINER_NAME ($OLD_CONTAINER_ID)"
+              docker stop $OLD_CONTAINER_ID
+              echo "Removing existing container: $CONTAINER_NAME"
+              docker rm $OLD_CONTAINER_ID
+            else
+              echo "No existing container named $CONTAINER_NAME found."
+            fi
+            
+            echo "Starting new container: $CONTAINER_NAME from $IMAGE_NAME_WITH_TAG"
+            # Chạy container mới với --restart=always để tự phục hồi khi crash/reboot
+            # Và thêm healthcheck đơn giản (tùy chọn)
+            docker run -d \
+              -p 80:80 \
+              --name $CONTAINER_NAME \
+              --restart=always \
+              $IMAGE_NAME_WITH_TAG
 
-            echo "Khởi động container mới: $CONTAINER_NAME từ $IMAGE_NAME"
-            docker run -d -p 80:80 --name $CONTAINER_NAME --restart=always $IMAGE_NAME
+            # (Tùy chọn) Thêm một bước kiểm tra đơn giản xem web có chạy không sau khi deploy
+            echo "Performing simple health check..."
+            sleep 5 # Chờ container khởi động
+            # Kiểm tra xem có thể kết nối tới localhost:80 (bên trong server) không
+            if curl --fail --silent --max-time 5 http://localhost:80 > /dev/null; then
+              echo "Health check PASSED. Deployment successful!"
+              # Xóa image cũ không dùng đến (trừ image đang chạy và latest)
+              docker image prune -af --filter "label!=maintainer=me" 
+            else
+              echo "Health check FAILED! Deployment might have issues."
+              # Chỗ này có thể thêm logic rollback phức tạp hơn nếu muốn
+              # Ví dụ: docker start $OLD_CONTAINER_ID (nếu bạn giữ lại container cũ thay vì rm)
+              exit 1 # Báo lỗi để pipeline biết deploy thất bại
+            fi
+            echo "--- Deployment Script Finished ---"
 
-            echo "Triển khai thành công!"
+      # === Notification Step ===
 
-            # (Tùy chọn) Xóa các image không sử dụng để giải phóng dung lượng
-            docker image prune -af
+      # Bước 8: Gửi thông báo kết quả tới Slack
+      # (Hoàn thiện Bước 10 - Nhận thông báo)
+      # Luôn chạy bước này, bất kể các bước trước thành công hay thất bại (always())
+      - name: Send Slack Notification
+        if: always() # Luôn chạy, kể cả khi các bước trước thất bại
+        uses: rtCamp/action-slack-notify@v2 # Sử dụng action thông báo Slack
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }} # Sử dụng Webhook URL thay vì Bot Token (đơn giản hơn)
+          SLACK_USERNAME: "GitHub Actions CI/CD"
+          SLACK_ICON_EMOJI: ":github:"
+          SLACK_COLOR: ${{ job.status }} # Màu thông báo theo trạng thái job (success=good, failure=danger)
+          SLACK_MESSAGE: "Build & Deploy Job *${{ job.status }}* for repository `${{ github.repository }}`.\nCommit: `${{ github.sha }}` by `${{ github.actor }}`.\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>"
