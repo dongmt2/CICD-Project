@@ -1,21 +1,35 @@
-# Sử dụng image Nginx chính thức dựa trên Alpine (đã có Nginx cài sẵn và cấu hình chạy)
-FROM nginx:alpine
-# Hoặc chỉ định phiên bản cụ thể hơn nếu muốn, ví dụ: nginx:1.27-alpine
+# Chọn phiên bản Nginx Alpine cụ thể và mới nhất (Kiểm tra phiên bản ổn định mới nhất trên Docker Hub)
+# Ví dụ dùng 1.27, bạn nên kiểm tra và thay bằng bản vá lỗi mới nhất của 1.27 hoặc phiên bản ổn định mới hơn
+FROM nginx:1.27-alpine
 
-# Ghi chú: Có thể bạn muốn xóa file cấu hình mặc định của Nginx nếu bạn có file cấu hình riêng.
-# Ví dụ: RUN rm /etc/nginx/conf.d/default.conf
+# --- Tối ưu bảo mật ---
 
-# Sao chép nội dung ứng dụng web tĩnh từ thư mục CICD trong context build
-# vào thư mục phục vụ web mặc định của Nginx trong container.
-# Quan trọng: Đảm bảo thư mục CICD chứa file index.html và các tài nguyên khác.
-COPY . /usr/share/nginx/html/
+# 1. Cập nhật các gói hệ điều hành lên phiên bản mới nhất tại thời điểm build
+# Chuyển sang user root để thực hiện lệnh apk
+USER root
+RUN apk update && apk upgrade --no-cache
 
-# Ghi chú quan trọng:
-# 1. Image nginx:alpine đã tự động EXPOSE cổng 80.
-# 2. Image nginx:alpine đã có sẵn CMD để khởi động Nginx đúng cách.
-#    Bạn KHÔNG cần thêm CMD ["nginx", "-g", "daemon off;"] trừ khi bạn muốn ghi đè cấu hình mặc định.
+# 2. Sao chép *chỉ* các tệp ứng dụng cần thiết
+# Quay lại sử dụng đường dẫn ./CICD/ vì code web nằm trong thư mục đó.
+# Đảm bảo Dockerfile này nằm ở thư mục gốc repo, cùng cấp với thư mục CICD.
+# Thêm --chown để user nginx (sẽ dùng ở dưới) có quyền đọc file.
+COPY --chown=nginx:nginx ./CICD/ /usr/share/nginx/html/
 
-# Tạm thời bỏ qua các lệnh `apk upgrade` mà bạn đã thêm.
-# Image nginx:alpine thường xuyên được cập nhật và có thể đã bao gồm các bản vá cần thiết.
-# Nếu sau khi build lại với image này mà Trivy vẫn báo lỗi cho các thư viện đó,
-# bạn mới cần xem xét thêm lại lệnh `RUN apk update && apk add --upgrade tên-gói` nếu thực sự cần thiết.
+# 3. (Tùy chọn) Nếu bạn có file cấu hình Nginx riêng, hãy sao chép nó vào
+# Ví dụ: COPY --chown=nginx:nginx custom-nginx.conf /etc/nginx/conf.d/default.conf
+
+# 4. Đảm bảo thư mục Nginx cần ghi (logs, cache, pid) có quyền phù hợp cho user nginx
+# Các thư mục này thường được tạo sẵn và cấp quyền trong ảnh gốc, nhưng kiểm tra lại không thừa
+RUN touch /var/run/nginx.pid && \
+    chown -R nginx:nginx /var/run/nginx.pid && \
+    chown -R nginx:nginx /var/cache/nginx
+
+# 5. Chuyển sang chạy Nginx với user không phải root (user 'nginx' có sẵn trong ảnh gốc)
+USER nginx
+
+# --- Kết thúc tối ưu bảo mật ---
+
+# Ghi chú: Ảnh gốc nginx:alpine đã EXPOSE 80 và có CMD phù hợp để chạy Nginx.
+# Bạn không cần thêm chúng trừ khi muốn ghi đè.
+# EXPOSE 80
+# CMD ["nginx", "-g", "daemon off;"]
