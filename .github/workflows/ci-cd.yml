@@ -7,7 +7,6 @@ on:
   pull_request:
     branches:
       - main
-
 env:
   DOCKER_IMAGE_NAME: dongmt2/my-web-app 
   CONTAINER_NAME: my-running-app
