@@ -13,7 +13,7 @@ RUN apk update && apk upgrade --no-cache
 # Quay lại sử dụng đường dẫn ./CICD/ vì code web nằm trong thư mục đó.
 # Đảm bảo Dockerfile này nằm ở thư mục gốc repo, cùng cấp với thư mục CICD.
 # Thêm --chown để user nginx (sẽ dùng ở dưới) có quyền đọc file.
-COPY --chown=nginx:nginx ./CICD/ /usr/share/nginx/html/
+COPY --chown=nginx:nginx . /usr/share/nginx/html/
 
 # 3. (Tùy chọn) Nếu bạn có file cấu hình Nginx riêng, hãy sao chép nó vào
 # Ví dụ: COPY --chown=nginx:nginx custom-nginx.conf /etc/nginx/conf.d/default.conf
