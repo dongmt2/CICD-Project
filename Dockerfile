@@ -5,3 +5,4 @@ FROM alpine:3.21.4
 # vào thư mục gốc mà Nginx dùng để phục vụ nội dung web.
 COPY . /usr/share/nginx/html
 RUN apk update && apk upgrade libexpat libxml2
+RUN apk update && apk upgrade libxslt xz-libs
