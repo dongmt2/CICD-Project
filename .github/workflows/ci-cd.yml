@@ -32,23 +32,35 @@ jobs:
           docker build -t ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} -t ${{ env.DOCKER_IMAGE_NAME }}:latest .
           echo "Image Built: ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} and :latest"
 
-      # Chạy Trivy để tạo file báo cáo chi tiết (luôn thành công bước này để có báo cáo)
+# Chạy Trivy để tạo file báo cáo chi tiết
+      # Mount Docker socket và Workspace để Trivy truy cập được image và ghi file
       - name: Generate Trivy Scan Report
         run: |
           docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $GITHUB_WORKSPACE:$GITHUB_WORKSPACE -w $GITHUB_WORKSPACE \
             aquasec/trivy image --format table --output ${{ env.TRIVY_REPORT_FILE }} --ignore-unfixed \
             --vuln-type os,library --severity CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN \
-            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} || echo "Trivy scan completed (report generated at ${{ env.TRIVY_REPORT_FILE }})"
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+            
+          # Kiểm tra xem file báo cáo đã thực sự được tạo chưa
+          if [[ ! -f "${{ env.TRIVY_REPORT_FILE }}" ]]; then
+            echo "::error::Trivy report file (${{ env.TRIVY_REPORT_FILE }}) was not created! Check Trivy execution logs."
+            exit 1 # Đánh dấu bước này thất bại nếu không tạo được file
+          else
+            echo "Trivy report generated at ${{ env.TRIVY_REPORT_FILE }}"
+          fi
 
       # Chạy Trivy lần nữa để kiểm tra và dừng pipeline nếu có lỗi nghiêm trọng
+      # Mount Docker socket ở đây nữa
       - name: Check for High/Critical Vulnerabilities
         run: |
           docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy image --exit-code 1 --ignore-unfixed \
             --vuln-type os,library --severity CRITICAL,HIGH \
             ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
           echo "Trivy security check passed (No High/Critical vulnerabilities found)."
-
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
