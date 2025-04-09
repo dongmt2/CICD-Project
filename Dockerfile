@@ -8,7 +8,7 @@ FROM nginx:alpine
 # Sao chép nội dung ứng dụng web tĩnh từ thư mục CICD trong context build
 # vào thư mục phục vụ web mặc định của Nginx trong container.
 # Quan trọng: Đảm bảo thư mục CICD chứa file index.html và các tài nguyên khác.
-COPY ./CICD/ /usr/share/nginx/html/
+COPY /usr/share/nginx/html/
 
 # Ghi chú quan trọng:
 # 1. Image nginx:alpine đã tự động EXPOSE cổng 80.
