@@ -9,7 +9,7 @@ on:
       - main
 
 env:
-  DOCKER_IMAGE_NAME: dongmt2/my-web-app # Thay bằng username/tên_image của bạn
+  DOCKER_IMAGE_NAME: dongmt2/my-web-app 
   CONTAINER_NAME: my-running-app
   TRIVY_REPORT_FILE: trivy_report.txt
 
