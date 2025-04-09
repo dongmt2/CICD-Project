@@ -1,5 +1,4 @@
 # Sử dụng image Nginx phiên bản Alpine (nhẹ và tối ưu)
-FROM nginx:alpine
 FROM alpine:3.21.4
 # Sao chép toàn bộ tệp và thư mục trong dự án CICD
 # vào thư mục gốc mà Nginx dùng để phục vụ nội dung web.
