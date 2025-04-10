@@ -1,1 +1,212 @@
+name: Enhanced CI/CD Pipeline with Detailed Notifications
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+      
+env:
+  DOCKER_IMAGE_NAME: dongmt2/my-web-app 
+  CONTAINER_NAME: my-running-app
+  TRIVY_REPORT_FILE: trivy_report.txt
+
+jobs:
+  build-scan-push-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # === CI Steps ===
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get Git commit short SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} -t ${{ env.DOCKER_IMAGE_NAME }}:latest .
+          echo "Image Built: ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} and :latest"
+
+# Chạy Trivy để tạo file báo cáo chi tiết
+      # Mount Docker socket và Workspace để Trivy truy cập được image và ghi file
+      - name: Generate Trivy Scan Report
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $GITHUB_WORKSPACE:$GITHUB_WORKSPACE -w $GITHUB_WORKSPACE \
+            aquasec/trivy image --format table --output ${{ env.TRIVY_REPORT_FILE }} --ignore-unfixed \
+            --vuln-type os,library --severity CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN \
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+            
+          # Kiểm tra xem file báo cáo đã thực sự được tạo chưa
+          if [[ ! -f "${{ env.TRIVY_REPORT_FILE }}" ]]; then
+            echo "::error::Trivy report file (${{ env.TRIVY_REPORT_FILE }}) was not created! Check Trivy execution logs."
+            exit 1 # Đánh dấu bước này thất bại nếu không tạo được file
+          else
+            echo "Trivy report generated at ${{ env.TRIVY_REPORT_FILE }}"
+          fi
+
+      # Chạy Trivy lần nữa để kiểm tra và dừng pipeline nếu có lỗi nghiêm trọng
+      # Mount Docker socket ở đây nữa
+      - name: Check for High/Critical Vulnerabilities
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy image --exit-code 1 --ignore-unfixed \
+            --vuln-type os,library --severity CRITICAL,HIGH \
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          echo "Trivy security check passed (No High/Critical vulnerabilities found)."
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Push image to Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          docker push ${{ env.DOCKER_IMAGE_NAME }}:latest
+          echo "Image pushed: ${{ env.DOCKER_IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }} and :latest"
+
+      # === CD Steps ===
+      - name: Deploy to Production Server
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: appleboy/ssh-action@master
+        id: deploy # Đặt ID cho bước này để lấy output nếu cần
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            IMAGE_TAG="${{ steps.vars.outputs.sha_short }}"
+            IMAGE_NAME_WITH_TAG="${{ env.DOCKER_IMAGE_NAME }}:$IMAGE_TAG"
+            CONTAINER_NAME="${{ env.CONTAINER_NAME }}"
+
+            echo "--- Starting Deployment on Server ---"
+            docker pull $IMAGE_NAME_WITH_TAG
+            OLD_CONTAINER_ID=$(docker ps -q -f name=$CONTAINER_NAME)
+            if [ ! -z "$OLD_CONTAINER_ID" ]; then
+              echo "Stopping existing container: $CONTAINER_NAME ($OLD_CONTAINER_ID)"
+              docker stop $OLD_CONTAINER_ID
+              echo "Removing existing container: $CONTAINER_NAME"
+              docker rm $OLD_CONTAINER_ID
+            else
+              echo "No existing container named $CONTAINER_NAME found."
+            fi
+            echo "Starting new container: $CONTAINER_NAME from $IMAGE_NAME_WITH_TAG"
+            docker run -d -p 80:80 --name $CONTAINER_NAME --restart=always $IMAGE_NAME_WITH_TAG
+            echo "Performing simple health check..."
+            sleep 5 
+            if curl --fail --silent --max-time 5 http://localhost:80 > /dev/null; then
+              echo "Health check PASSED. Deployment successful!"
+              docker image prune -af --filter "label!=maintainer=me" 
+            else
+              echo "Health check FAILED! Deployment might have issues."
+              # Cân nhắc thêm lệnh để gửi tín hiệu lỗi cụ thể hơn nếu cần
+              exit 1 
+            fi
+            echo "--- Deployment Script Finished ---"
+
+      # === Notification Step ===
+
+      # Đọc một phần nội dung báo cáo Trivy để nhúng vào Slack
+      - name: Read Trivy Report Summary
+        id: trivy_report_summary
+        if: always() # Luôn chạy để lấy thông báo kể cả khi thất bại
+        run: |
+          if [[ -f "${{ env.TRIVY_REPORT_FILE }}" ]]; then
+            # Lấy khoảng 30 dòng đầu của báo cáo
+            report_content=$(head -n 30 "${{ env.TRIVY_REPORT_FILE }}")
+            # Escape ký tự đặc biệt cho JSON payload của Slack
+            report_content="${report_content//'%'/'%25'}"
+            report_content="${report_content//$'\n'/'%0A'}"
+            report_content="${report_content//$'\r'/'%0D'}"
+            echo "content<<EOF" >> $GITHUB_OUTPUT
+            echo "$report_content" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "file_exists=true" >> $GITHUB_OUTPUT
+            echo "status_text=Trivy report generated." >> $GITHUB_OUTPUT
+          else
+            echo "content=Trivy report file not found (${{ env.TRIVY_REPORT_FILE }})." >> $GITHUB_OUTPUT
+            echo "file_exists=false" >> $GITHUB_OUTPUT
+            echo "status_text=Trivy report not found." >> $GITHUB_OUTPUT
+          fi
+          
+      # Gửi thông báo chi tiết tới Slack
+      - name: Send Detailed Slack Notification
+        if: always()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          # ID của kênh Slack (Lấy từ URL của kênh trên trình duyệt: ví dụ C12345ABCDE)
+          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          # Sử dụng Slack Block Kit để định dạng tin nhắn đẹp hơn
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "CI/CD Pipeline Status: ${{ job.status }} :${{ job.status == 'success' && 'white_check_mark' || 'x' }}:",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {"type": "mrkdwn", "text": "*Repository:*\n<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>"},
+                    {"type": "mrkdwn", "text": "*Branch:*\n`${{ github.ref_name }}`"},
+                    {"type": "mrkdwn", "text": "*Commit:*\n<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|`${{ steps.vars.outputs.sha_short }}`>"},
+                    {"type": "mrkdwn", "text": "*Triggered by:*\n`${{ github.actor }}`"}
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Trivy Security Scan Summary:*\n${{ steps.trivy_report_summary.outputs.status_text }}"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "${{ steps.trivy_report_summary.outputs.file_exists == 'true' && format('```\n{0}\n```', steps.trivy_report_summary.outputs.content) || steps.trivy_report_summary.outputs.content }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                   "type": "section",
+                   "text": {
+                     "type": "mrkdwn",
+                     "text": "*Deployment Status:*\n`${{ steps.deploy.outcome || 'Skipped/Failed Before Deploy' }}`" 
+                   }
+                 },
+                {
+                  "type": "context",
+                  "elements": [
+                     {
+                      "type": "mrkdwn",
+                      "text": "*Action:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Full Workflow Run>"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          # Token của Slack Bot (Bắt buộc cho action này)
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
